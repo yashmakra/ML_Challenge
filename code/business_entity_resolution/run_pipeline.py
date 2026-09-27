@@ -18,6 +18,7 @@ def main():
     ap.add_argument('--output-dir',type=Path,default=Path(__file__).resolve().parent/'output')
     ap.add_argument('--top-k',type=int,default=50)
     ap.add_argument('--final-candidates',type=int,default=75)
+    ap.add_argument('--threshold',type=float,default=None,help='Inference cutoff; defaults to the F0.5-optimal value in selection.json')
     a=ap.parse_args();root=Path(__file__).resolve().parent;a.cache_dir.mkdir(parents=True,exist_ok=True)
     if a.stage in ('all','train'):
         build(a.data_root,'train',a.cache_dir/'train_targets.sqlite')
@@ -36,7 +37,7 @@ def main():
             singleton_rules(sample,root/'reports')
     if a.stage in ('all','predict'):
         build(a.data_root,'test',a.cache_dir/'test_targets.sqlite')
-        predict(a.data_root,a.cache_dir/'test_targets.sqlite',root/'models',a.output_dir)
+        predict(a.data_root,a.cache_dir/'test_targets.sqlite',root/'models',a.output_dir,threshold=a.threshold)
     if a.stage in ('all','predict','resolve'):
         resolve(a.output_dir/'matching_results.tsv',a.data_root,root/'models',a.output_dir/'matching_results.tsv',root/'reports'/'conflict_resolution.json')
     if a.stage in ('all','validate'):

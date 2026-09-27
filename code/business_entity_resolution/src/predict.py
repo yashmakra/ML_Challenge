@@ -8,12 +8,12 @@ import pandas as pd
 from blocking import connect,retrieve
 from features import pair_features,rank_candidates
 
-_CON=None;_MODEL=None;_CFG=None;_SHARD=None
-def _init_worker(index_path,model_dir,shard_dir):
-    global _CON,_MODEL,_CFG,_SHARD
+_CON=None;_MODEL=None;_CFG=None;_SHARD=None;_SCORES=None;_THRESHOLD=None
+def _init_worker(index_path,model_dir,shard_dir,scores_dir,threshold):
+    global _CON,_MODEL,_CFG,_SHARD,_SCORES,_THRESHOLD
     _CON=connect(index_path);_CFG=json.loads((Path(model_dir)/'selection.json').read_text(encoding='utf-8'))
     _MODEL=None if _CFG['experiment']=='weighted_similarity' else joblib.load(Path(model_dir)/'best_model.joblib')
-    _SHARD=Path(shard_dir)
+    _SHARD=Path(shard_dir);_SCORES=Path(scores_dir);_THRESHOLD=threshold
 
 def _work(task):
     idx,records=task;start=time.time();features=[];entities=[]
@@ -25,11 +25,13 @@ def _work(task):
         entities.append((sid,ids))
     X=np.vstack(features) if features else np.empty((0,len(_CFG['feature_names'])),dtype=np.float32)
     scores=(.58*X[:,0]+.42*X[:,14]) if _MODEL is None else _MODEL.predict_proba(X)[:,1] if len(X) else np.empty(0)
+    # Persisted so a threshold change can be applied without re-running inference.
+    np.save(_SCORES/f'scores_{idx:05d}.npy',np.asarray(scores,dtype=np.float32))
     links=0;pos=0
     with (_SHARD/f'candidate_{idx:05d}.tsv').open('w',encoding='utf-8',newline='') as fc,(_SHARD/f'matching_{idx:05d}.tsv').open('w',encoding='utf-8',newline='') as fm:
         wc=csv.writer(fc,delimiter='\t',lineterminator='\n');wm=csv.writer(fm,delimiter='\t',lineterminator='\n')
         for sid,ids in entities:
-            take=[ids[j] for j,p in enumerate(scores[pos:pos+len(ids)]) if p>=_CFG['threshold']]
+            take=[ids[j] for j,p in enumerate(scores[pos:pos+len(ids)]) if p>=_THRESHOLD]
             wc.writerow([sid,','.join(ids)]);wm.writerow([sid,','.join(take)])
             pos+=len(ids);links+=len(take)
     return idx,len(entities),links,round(time.time()-start,1)
@@ -38,11 +40,15 @@ def _tasks(data_root,chunk_size):
     for idx,chunk in enumerate(pd.read_csv(Path(data_root)/'test'/'test_source1.tsv',sep='\t',dtype=str,keep_default_na=False,chunksize=chunk_size)):
         yield idx,list(chunk.itertuples(index=False,name=None))
 
-def predict(data_root,index_path,model_dir,output_dir,workers=6,chunk_size=2000):
+def predict(data_root,index_path,model_dir,output_dir,workers=6,chunk_size=2000,threshold=None):
     output_dir=Path(output_dir);output_dir.mkdir(parents=True,exist_ok=True)
     shard_dir=output_dir.parent/'cache'/'shards';shard_dir.mkdir(parents=True,exist_ok=True)
+    scores_dir=output_dir.parent/'cache'/'scores';scores_dir.mkdir(parents=True,exist_ok=True)
+    if threshold is None:
+        threshold=json.loads((Path(model_dir)/'selection.json').read_text(encoding='utf-8'))['threshold']
+    print('inference threshold',threshold,flush=True)
     start=time.time();n=links=chunks=0
-    with ProcessPoolExecutor(max_workers=workers,initializer=_init_worker,initargs=(str(Path(index_path).resolve()),str(Path(model_dir).resolve()),str(shard_dir.resolve()))) as pool:
+    with ProcessPoolExecutor(max_workers=workers,initializer=_init_worker,initargs=(str(Path(index_path).resolve()),str(Path(model_dir).resolve()),str(shard_dir.resolve()),str(scores_dir.resolve()),float(threshold))) as pool:
         source=iter(_tasks(data_root,chunk_size));pending={}
         for _ in range(workers*2):
             try:task=next(source)
